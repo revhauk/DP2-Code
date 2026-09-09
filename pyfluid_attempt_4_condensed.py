@@ -1,0 +1,272 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from pyfluids import Fluid, FluidsList, Input
+
+# Inputs
+MAX_WATER_L = 0.32 # L
+P_ATM = 101325.0 # Pa
+T_INITIAL_C = 25.0 # deg C
+T_FINAL_C = 175.0 # deg C   
+V_TOTAL_PIPE = 0.25 # m3
+
+# Constants
+R_AIR = 287.05
+R_WATER_VAPOUR = 461.518
+T_INITIAL_K = T_INITIAL_C + 273.15
+
+# Water properties
+def water_sat_pressure(T_C):
+    water = Fluid(FluidsList.Water).with_state(
+        Input.temperature(T_C), Input.quality(1.0)
+    )
+    return water.pressure
+
+def water_liquid_density(T_C):
+    water = Fluid(FluidsList.Water).with_state(
+        Input.temperature(T_C), Input.quality(0.0)
+    )
+    return water.density
+
+P_WATER_INITIAL = water_sat_pressure(T_INITIAL_C)
+RHO_WATER_INITIAL = water_liquid_density(T_INITIAL_C)
+
+def get_initial_air_mass(starting_water_L): # Finds initial air mass using ideal gas law
+    V_water_initial = starting_water_L / 1000.0
+    V_air_initial = V_TOTAL_PIPE - V_water_initial
+
+    if V_air_initial < 0:
+        raise ValueError("Initial water volume cannot exceed total pipe volume.")
+
+    P_air_initial = P_ATM if starting_water_L == 0 else P_ATM - P_WATER_INITIAL
+
+    return P_air_initial * V_air_initial / (R_AIR * T_INITIAL_K)
+
+def vessel_pressure( # Big pressure finding function
+    T_C,
+    starting_water_L,
+    m_air=None,
+    m_water_total=None,
+    rho_liquid=None,
+    P_sat=None
+):
+    T_K = T_C + 273.15
+
+    if m_water_total is None:
+        V_water_initial = starting_water_L / 1000.0
+        m_water_total = RHO_WATER_INITIAL * V_water_initial
+
+    if m_air is None:
+        m_air = get_initial_air_mass(starting_water_L)
+
+    if starting_water_L == 0: # No water case, just uses ideal gas law
+        V_gas = V_TOTAL_PIPE
+        P_air = m_air * R_AIR * T_K / V_gas
+        return P_air, P_air, 0.0, V_gas, 0.0, 0.0, "dry air"
+
+    if rho_liquid is None:
+        rho_liquid = water_liquid_density(T_C)
+
+    if P_sat is None:
+        P_sat = water_sat_pressure(T_C)
+
+    evaporation_coefficient = P_sat / (R_WATER_VAPOUR * T_K)
+
+    numerator = V_TOTAL_PIPE - m_water_total / rho_liquid
+    denominator = 1.0 - evaporation_coefficient / rho_liquid
+    V_gas = numerator / denominator
+
+    if 0 < V_gas <= V_TOTAL_PIPE:
+        m_vapour = evaporation_coefficient * V_gas
+        m_liquid = m_water_total - m_vapour
+
+        if m_liquid >= 0:
+            P_air = m_air * R_AIR * T_K / V_gas
+            P_water = P_sat
+            P_total = P_air + P_water
+
+            return (
+                P_total, P_air, P_water, V_gas,
+                m_liquid, m_vapour,
+                "liquid water + saturated vapour"
+            )
+
+    V_gas = V_TOTAL_PIPE
+    P_air = m_air * R_AIR * T_K / V_gas
+    P_water = m_water_total * R_WATER_VAPOUR * T_K / V_gas
+    P_total = P_air + P_water
+
+    if P_water < P_sat:
+        return (
+            P_total, P_air, P_water, V_gas,
+            0.0, m_water_total,
+            "all water evaporated"
+        )
+
+    P_water = P_sat
+    P_total = P_air + P_water
+    m_vapour = P_water * V_gas / (R_WATER_VAPOUR * T_K)
+    m_liquid = max(0.0, m_water_total - m_vapour)
+
+    return (
+        P_total, P_air, P_water, V_gas,
+        m_liquid, m_vapour,
+        "saturated water vapour"
+    )
+
+print("=" * 90)
+print(f"FIXED PIPE VOLUME ({V_TOTAL_PIPE} m³) PRESSURE AT {T_FINAL_C} °C")
+print("=" * 90)
+
+test_volumes = np.linspace(0, MAX_WATER_L, 8)
+
+for water_L in test_volumes:
+    result = vessel_pressure(T_FINAL_C, water_L)
+
+    P_total, P_air, P_water, V_gas, m_liquid, m_vapour, state = result
+
+    print(
+        f"{water_L:6.2f} L | "
+        f"P = {P_total / 1000:9.3f} kPa | "
+        f"Air = {P_air / 1000:8.3f} | "
+        f"H₂O = {P_water / 1000:8.3f} | "
+        f"Gas V = {V_gas:.6f} m³ | "
+        f"{state}"
+    )
+
+temperatures_C = np.linspace(T_INITIAL_C, T_FINAL_C, 171)
+water_volumes_L = np.linspace(0.0, MAX_WATER_L, 201)
+
+T_grid, W_grid = np.meshgrid(temperatures_C, water_volumes_L)
+
+print()
+print("Calculating water properties...")
+
+sat_pressure = np.array([water_sat_pressure(T) for T in temperatures_C])
+liquid_density = np.array([water_liquid_density(T) for T in temperatures_C])
+
+print("Calculating pressure grid...")
+
+P_grid = np.zeros((len(water_volumes_L), len(temperatures_C)))
+
+for i, water_L in enumerate(water_volumes_L):
+    V_water_initial = water_L / 1000.0
+    m_water_total = RHO_WATER_INITIAL * V_water_initial
+    m_air = get_initial_air_mass(water_L)
+
+    for j, T_C in enumerate(temperatures_C):
+        P_grid[i, j] = vessel_pressure(
+            T_C,
+            water_L,
+            m_air=m_air,
+            m_water_total=m_water_total,
+            rho_liquid=liquid_density[j],
+            P_sat=sat_pressure[j]
+        )[0]
+
+P_grid_kPa = P_grid / 1000.0
+P_grid_kPa_gauge = P_grid_kPa-101.325
+
+print("Pressure calculations complete.")
+
+plt.rcParams.update({
+    "font.family": "DejaVu Sans",
+    "font.size": 11,
+    "axes.labelsize": 12,
+    "axes.titlesize": 14,
+    "legend.fontsize": 9,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "axes.linewidth": 0.8
+})
+
+# 3-D pressure surface
+fig = plt.figure(figsize=(10, 7.5), dpi=150)
+ax = fig.add_subplot(111, projection="3d")
+
+surface = ax.plot_surface(
+    T_grid, W_grid, P_grid_kPa_gauge,
+    cmap="plasma",
+    linewidth=0,
+    antialiased=True,
+    alpha=0.95
+)
+
+ax.set_xlabel("Temperature (°C)", labelpad=10)
+ax.set_ylabel("Initial water volume (L)", labelpad=10)
+ax.set_zlabel("Gauge pressure (kPa)", labelpad=10)
+
+ax.set_xlim(T_INITIAL_C, T_FINAL_C)
+ax.set_ylim(0.0, MAX_WATER_L)
+ax.view_init(elev=28, azim=-125)
+ax.grid(True, alpha=0.25)
+
+cbar = fig.colorbar(surface, ax=ax, shrink=0.65, pad=0.10)
+cbar.set_label("Gauge pressure (kPa)")
+
+fig.suptitle("Pressure Response of a Rigid Sealed Vessel", fontsize=15, y=0.96)
+fig.text(0.5, 0.915, "Total internal volume = 0.25 m³", ha="center", fontsize=10)
+
+plt.tight_layout()
+fig.savefig("pressure_surface_3D.png", dpi=600, bbox_inches="tight")
+
+# 2-D pressure curves
+fig, ax = plt.subplots(figsize=(9.5, 6), dpi=150)
+
+colours = [
+    "#0072B2",
+    "#E69F00",
+    "#009E73",
+    "#D55E00",
+    "#CC79A7",
+    "#56B4E9",
+    "#F0E442",
+    "#000000"
+]
+
+selected_volumes = np.linspace(0, MAX_WATER_L, 8)
+
+for i, water_L in enumerate(selected_volumes):
+    index = np.argmin(np.abs(water_volumes_L - water_L))
+    pressure = P_grid_kPa_gauge[index, :]
+
+    ax.plot(
+        temperatures_C,
+        pressure,
+        color=colours[i],
+        linestyle="-",
+        linewidth=2.0,
+        solid_capstyle="round",
+        label=f"{water_L:g} L"
+    )
+
+ax.set_xlabel("Temperature (°C)")
+ax.set_ylabel("Gauge pressure (kPa)")
+ax.set_title("Pressure Response for Selected Initial Water Volumes", pad=12)
+ax.set_xlim(T_INITIAL_C, T_FINAL_C)
+
+selected_indices = [
+    np.argmin(np.abs(water_volumes_L - volume))
+    for volume in selected_volumes
+]
+
+selected_pressure = P_grid_kPa_gauge[selected_indices, :]
+pressure_min = selected_pressure.min()
+pressure_max = selected_pressure.max()
+pressure_range = pressure_max - pressure_min
+
+ax.set_ylim(
+    pressure_min - 0.05 * pressure_range,
+    pressure_max + 0.05 * pressure_range
+)
+
+ax.grid(True, which="major", linestyle="--", linewidth=0.7, alpha=0.35)
+ax.minorticks_on()
+ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.20)
+
+legend = ax.legend(title="Initial water volume", loc="best", frameon=True, ncol=2)
+legend.get_frame().set_alpha(0.95)
+
+fig.tight_layout()
+fig.savefig("pressure_curves_2D.png", dpi=600, bbox_inches="tight")
+
+plt.show()
