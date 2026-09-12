@@ -8,6 +8,7 @@ P_ATM = 101325.0 # Pa
 T_INITIAL_C = 25.0 # deg C
 T_FINAL_C = 175.0 # deg C   
 V_TOTAL_PIPE = 0.25 # m3
+POPPER_ACTIVATION_KPA = 120 # kPa, gauge pressure at which the popper will activate
 
 # Constants
 R_AIR = 287.05
@@ -17,7 +18,7 @@ T_INITIAL_K = T_INITIAL_C + 273.15
 # Water properties
 def water_sat_pressure(T_C):
     water = Fluid(FluidsList.Water).with_state(
-        Input.temperature(T_C), Input.quality(1.0)
+        Input.temperature(T_C), Input.quality(100.0)
     )
     return water.pressure
 
@@ -26,6 +27,18 @@ def water_liquid_density(T_C):
         Input.temperature(T_C), Input.quality(0.0)
     )
     return water.density
+
+def water_vapour_density(T_C):
+    water = Fluid(FluidsList.Water).with_state(
+        Input.temperature(T_C), Input.quality(100.0)
+    )
+    return water.density
+
+def superheated_vapour_pressure(T_C, rho_vapour):
+    water = Fluid(FluidsList.Water).with_state(
+        Input.temperature(T_C), Input.density(rho_vapour)
+    )
+    return water.pressure
 
 P_WATER_INITIAL = water_sat_pressure(T_INITIAL_C)
 RHO_WATER_INITIAL = water_liquid_density(T_INITIAL_C)
@@ -47,7 +60,8 @@ def vessel_pressure( # Big pressure finding function
     m_air=None,
     m_water_total=None,
     rho_liquid=None,
-    P_sat=None
+    P_sat=None,
+    rho_vapour_sat=None
 ):
     T_K = T_C + 273.15
 
@@ -69,7 +83,10 @@ def vessel_pressure( # Big pressure finding function
     if P_sat is None:
         P_sat = water_sat_pressure(T_C)
 
-    evaporation_coefficient = P_sat / (R_WATER_VAPOUR * T_K)
+    if rho_vapour_sat is None:
+        rho_vapour_sat = water_vapour_density(T_C)
+
+    evaporation_coefficient = rho_vapour_sat
 
     numerator = V_TOTAL_PIPE - m_water_total / rho_liquid
     denominator = 1.0 - evaporation_coefficient / rho_liquid
@@ -92,7 +109,8 @@ def vessel_pressure( # Big pressure finding function
 
     V_gas = V_TOTAL_PIPE
     P_air = m_air * R_AIR * T_K / V_gas
-    P_water = m_water_total * R_WATER_VAPOUR * T_K / V_gas
+    rho_vapour = m_water_total / V_gas
+    P_water = superheated_vapour_pressure(T_C, rho_vapour)
     P_total = P_air + P_water
 
     if P_water < P_sat:
@@ -143,6 +161,7 @@ print("Calculating water properties...")
 
 sat_pressure = np.array([water_sat_pressure(T) for T in temperatures_C])
 liquid_density = np.array([water_liquid_density(T) for T in temperatures_C])
+vapour_density_sat = np.array([water_vapour_density(T) for T in temperatures_C])
 
 print("Calculating pressure grid...")
 
@@ -160,6 +179,7 @@ for i, water_L in enumerate(water_volumes_L):
             m_air=m_air,
             m_water_total=m_water_total,
             rho_liquid=liquid_density[j],
+            rho_vapour_sat=vapour_density_sat[j],
             P_sat=sat_pressure[j]
         )[0]
 
@@ -207,6 +227,10 @@ fig.suptitle("Pressure Response of a Rigid Sealed Vessel", fontsize=15, y=0.96)
 fig.text(0.5, 0.915, "Total internal volume = 0.25 m³", ha="center", fontsize=10)
 
 plt.tight_layout()
+
+threshold_plane = np.full_like(P_grid_kPa_gauge, POPPER_ACTIVATION_KPA)
+ax.plot_surface(T_grid, W_grid, threshold_plane, color="green", alpha=0.25, linewidth=0)
+
 fig.savefig("pressure_surface_3D.png", dpi=600, bbox_inches="tight")
 
 # 2-D pressure curves
@@ -265,6 +289,9 @@ ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.20)
 
 legend = ax.legend(title="Initial water volume", loc="best", frameon=True, ncol=2)
 legend.get_frame().set_alpha(0.95)
+
+ax.axhline(POPPER_ACTIVATION_KPA, color="red", linestyle="--", linewidth=1.5, label="Popper activation pressure")
+ax.legend(title="Initial water volume", loc="best", frameon=True, ncol=2)
 
 fig.tight_layout()
 fig.savefig("pressure_curves_2D.png", dpi=600, bbox_inches="tight")
