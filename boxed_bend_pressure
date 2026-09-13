@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from pyfluids import Fluid, FluidsList, Input
 
 # Inputs
-MAX_WATER_L = 0.32 # L
+MAX_WATER_L = 1 # L
 P_ATM = 101325.0 # Pa
 T_INITIAL_C = 25.0 # deg C
 T_FINAL_C = 175.0 # deg C   
@@ -15,7 +15,7 @@ R_AIR = 287.05
 R_WATER_VAPOUR = 461.518
 T_INITIAL_K = T_INITIAL_C + 273.15
 
-# Water properties
+# Helper Functions
 def water_sat_pressure(T_C):
     water = Fluid(FluidsList.Water).with_state(
         Input.temperature(T_C), Input.quality(100.0)
@@ -65,11 +65,11 @@ def vessel_pressure( # Big pressure finding function
 ):
     T_K = T_C + 273.15
 
-    if m_water_total is None:
+    if m_water_total is None: # Finds total water mass using initial water volume and initial water density
         V_water_initial = starting_water_L / 1000.0
         m_water_total = RHO_WATER_INITIAL * V_water_initial
 
-    if m_air is None:
+    if m_air is None: # Finds initial air mass using ideal gas law and initial water volume
         m_air = get_initial_air_mass(starting_water_L)
 
     if starting_water_L == 0: # No water case, just uses ideal gas law
@@ -77,36 +77,32 @@ def vessel_pressure( # Big pressure finding function
         P_air = m_air * R_AIR * T_K / V_gas
         return P_air, P_air, 0.0, V_gas, 0.0, 0.0, "dry air"
 
-    if rho_liquid is None:
+    if rho_liquid is None: # Finds liquid water density at the given temperature
         rho_liquid = water_liquid_density(T_C)
 
-    if P_sat is None:
+    if P_sat is None: # Finds saturation pressure of water at the given temperature
         P_sat = water_sat_pressure(T_C)
 
-    if rho_vapour_sat is None:
+    if rho_vapour_sat is None: # Finds saturation density of water vapour at the given temperature
         rho_vapour_sat = water_vapour_density(T_C)
 
-    evaporation_coefficient = rho_vapour_sat
-
+    # Assumes liquid and saturated vapour coexist. Total vessel volume splits between leftover liquid and the gas space: V_total = V_liquid + V_gas, where V_liquid = m_liquid/rho_liquid and m_liquid = m_water_total - m_vapour. Substituting andsolving for V_gas gives the two lines below (this is provisional - checked next).
     numerator = V_TOTAL_PIPE - m_water_total / rho_liquid
-    denominator = 1.0 - evaporation_coefficient / rho_liquid
+    denominator = 1.0 - rho_vapour_sat / rho_liquid
     V_gas = numerator / denominator
 
-    if 0 < V_gas <= V_TOTAL_PIPE:
-        m_vapour = evaporation_coefficient * V_gas
+    if 0 < V_gas <= V_TOTAL_PIPE: # Sanity check to ensure that the gas volume is within the bounds of the total pipe volume and greater than zero. If so, calculates the mass of the saturated vapour and the leftover liquid water.
+        m_vapour = rho_vapour_sat * V_gas
         m_liquid = m_water_total - m_vapour
 
-        if m_liquid >= 0:
+        if m_liquid >= 0: # Leftover liquid water case, calculates pressure of air (using ideal gas law) and water vapour (using CoolProp)
             P_air = m_air * R_AIR * T_K / V_gas
             P_water = P_sat
             P_total = P_air + P_water
 
-            return (
-                P_total, P_air, P_water, V_gas,
-                m_liquid, m_vapour,
-                "liquid water + saturated vapour"
-            )
+            return (P_total, P_air, P_water, V_gas, m_liquid, m_vapour, "liquid water + saturated vapour")
 
+    # Fully evaporated case
     V_gas = V_TOTAL_PIPE
     P_air = m_air * R_AIR * T_K / V_gas
     rho_vapour = m_water_total / V_gas
@@ -114,29 +110,20 @@ def vessel_pressure( # Big pressure finding function
     P_total = P_air + P_water
 
     if P_water < P_sat:
-        return (
-            P_total, P_air, P_water, V_gas,
-            0.0, m_water_total,
-            "all water evaporated"
-        )
+        return (P_total, P_air, P_water, V_gas, 0.0, m_water_total, "all water evaporated")
 
     P_water = P_sat
     P_total = P_air + P_water
     m_vapour = P_water * V_gas / (R_WATER_VAPOUR * T_K)
     m_liquid = max(0.0, m_water_total - m_vapour)
 
-    return (
-        P_total, P_air, P_water, V_gas,
-        m_liquid, m_vapour,
-        "saturated water vapour"
-    )
+    return (P_total, P_air, P_water, V_gas, m_liquid, m_vapour, "saturated water vapour")
 
-print("=" * 90)
-print(f"FIXED PIPE VOLUME ({V_TOTAL_PIPE} m³) PRESSURE AT {T_FINAL_C} °C")
-print("=" * 90)
+print(f"FIXED PIPE VOLUME ({V_TOTAL_PIPE} m³) PRESSURE AT {T_FINAL_C} °C") # Prints header for output table to console
 
-test_volumes = np.linspace(0, MAX_WATER_L, 8)
+test_volumes = np.linspace(0, MAX_WATER_L, 11) # 11 evenly spaced water volumes from 0 to MAX_WATER_L
 
+# Iterates through the test volumes, calculates the pressure for each volume at the final temperature, and prints the results in a formatted table to the console
 for water_L in test_volumes:
     result = vessel_pressure(T_FINAL_C, water_L)
 
@@ -151,14 +138,15 @@ for water_L in test_volumes:
         f"{state}"
     )
 
+# Temperature and water volume grids for plotting
 temperatures_C = np.linspace(T_INITIAL_C, T_FINAL_C, 171)
 water_volumes_L = np.linspace(0.0, MAX_WATER_L, 201)
 
 T_grid, W_grid = np.meshgrid(temperatures_C, water_volumes_L)
 
-print()
 print("Calculating water properties...")
 
+# Pre-calculate water properties for the entire temperature range to avoid repeated calculations in the pressure grid loop
 sat_pressure = np.array([water_sat_pressure(T) for T in temperatures_C])
 liquid_density = np.array([water_liquid_density(T) for T in temperatures_C])
 vapour_density_sat = np.array([water_vapour_density(T) for T in temperatures_C])
@@ -167,6 +155,7 @@ print("Calculating pressure grid...")
 
 P_grid = np.zeros((len(water_volumes_L), len(temperatures_C)))
 
+# Calculate the pressure grid for each combination of water volume and temperature, also only computes the necessary water properties once per temperature to improve efficiency
 for i, water_L in enumerate(water_volumes_L):
     V_water_initial = water_L / 1000.0
     m_water_total = RHO_WATER_INITIAL * V_water_initial
@@ -183,11 +172,12 @@ for i, water_L in enumerate(water_volumes_L):
             P_sat=sat_pressure[j]
         )[0]
 
-P_grid_kPa = P_grid / 1000.0
-P_grid_kPa_gauge = P_grid_kPa-101.325
+P_grid_kPa = P_grid / 1000.0 # Convert pressure from Pa to kPa
+P_grid_kPa_gauge = P_grid_kPa-101.325 #Convert pressure from absolute to gauge
 
 print("Pressure calculations complete.")
 
+# Plotting
 plt.rcParams.update({
     "font.family": "DejaVu Sans",
     "font.size": 11,
@@ -199,7 +189,7 @@ plt.rcParams.update({
     "axes.linewidth": 0.8
 })
 
-# 3-D pressure surface
+# 3D Surface
 fig = plt.figure(figsize=(10, 7.5), dpi=150)
 ax = fig.add_subplot(111, projection="3d")
 
@@ -228,12 +218,13 @@ fig.text(0.5, 0.915, "Total internal volume = 0.25 m³", ha="center", fontsize=1
 
 plt.tight_layout()
 
+# Add plane at popper activation pressure
 threshold_plane = np.full_like(P_grid_kPa_gauge, POPPER_ACTIVATION_KPA)
 ax.plot_surface(T_grid, W_grid, threshold_plane, color="green", alpha=0.25, linewidth=0)
 
 fig.savefig("pressure_surface_3D.png", dpi=600, bbox_inches="tight")
 
-# 2-D pressure curves
+# 2D Plot
 fig, ax = plt.subplots(figsize=(9.5, 6), dpi=150)
 
 colours = [
@@ -244,11 +235,15 @@ colours = [
     "#CC79A7",
     "#56B4E9",
     "#F0E442",
+    "#7F00FF",
+    "#FF2525",
+    "#58FA42",
     "#000000"
 ]
 
-selected_volumes = np.linspace(0, MAX_WATER_L, 8)
+selected_volumes = np.linspace(0, MAX_WATER_L, 11)
 
+# Grabs closest water volume from grid and plots
 for i, water_L in enumerate(selected_volumes):
     index = np.argmin(np.abs(water_volumes_L - water_L))
     pressure = P_grid_kPa_gauge[index, :]
@@ -268,6 +263,7 @@ ax.set_ylabel("Gauge pressure (kPa)")
 ax.set_title("Pressure Response for Selected Initial Water Volumes", pad=12)
 ax.set_xlim(T_INITIAL_C, T_FINAL_C)
 
+# Adjust y-axis limits based on the range of pressures for the selected water volumes (matplotlib bad)
 selected_indices = [
     np.argmin(np.abs(water_volumes_L - volume))
     for volume in selected_volumes
@@ -290,6 +286,7 @@ ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.20)
 legend = ax.legend(title="Initial water volume", loc="best", frameon=True, ncol=2)
 legend.get_frame().set_alpha(0.95)
 
+# Add horizontal line for popper activation pressure
 ax.axhline(POPPER_ACTIVATION_KPA, color="red", linestyle="--", linewidth=1.5, label="Popper activation pressure")
 ax.legend(title="Initial water volume", loc="best", frameon=True, ncol=2)
 
